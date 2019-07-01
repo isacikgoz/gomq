@@ -2,16 +2,17 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
+	"github.com/isacikgoz/gomq/api"
 	"github.com/isacikgoz/gomq/messaging"
 )
 
@@ -27,6 +28,21 @@ func main() {
 		IP:   net.ParseIP("127.0.0.1"),
 	}
 	udpConn, err := net.ListenUDP("udp", udpAddr)
+	defer udpConn.Close()
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Open TCP socket
+	tcpAddr, err := net.ResolveTCPAddr("tcp", ":12345")
+
+	if err != nil {
+		panic(err)
+	}
+
+	tcpListener, err := net.ListenTCP("tcp", tcpAddr)
+	defer tcpListener.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -40,26 +56,36 @@ func main() {
 
 	go listenOnUDPConnection(ctx, udpConn)
 
-	fmt.Fprintf(os.Stdout, "started.\n")
-
-	for {
-		select {
-		case <-ctx.Done():
-			break
-		case <-interrupt:
-			cancel()
-			return
-		}
+	if err := startServer(ctx, "8080"); err != nil {
+		log.Fatal(err)
 	}
 
+	fmt.Fprintf(os.Stdout, "started.\n")
+	quit := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Fprintln(os.Stdout, "context done.")
+				quit <- struct{}{}
+				return
+			case <-interrupt:
+				cancel()
+				fmt.Fprintln(os.Stdout, "cancelling context...")
+			}
+		}
+	}()
+	<-quit
 }
 
 func listenOnUDPConnection(ctx context.Context, udpConn *net.UDPConn) {
 	var buffer [2048]byte
-
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Fprintln(os.Stdout, "gracefully shutting down")
 			return
 		default:
 			length, remoteAddr, err := udpConn.ReadFromUDP(buffer[0:])
@@ -83,30 +109,54 @@ func listenOnUDPConnection(ctx context.Context, udpConn *net.UDPConn) {
 			}
 
 			// Log the number of bytes received
-			fmt.Fprintf(os.Stdout, "bytes received from UDP: %d, text: %s\n", length, string(buffer[:length]))
+			fmt.Fprintf(os.Stdout, "bytes received from UDP: %d\n", length)
 
-			// TODO: Parse message, and check if we're expecting a message
-			commandTokens := strings.Fields(string(buffer[:length]))
-			var message []byte
-			if commandTokens[0] == "pub" {
-				// Use bytes.Equal until Go1.7 (https://github.com/golang/go/issues/14302)
-				for {
-					var err error
-					length, _, err := udpConn.ReadFromUDP(buffer[0:])
-
-					if err != nil {
-						return
-					}
-
-					// TODO: Is this cross platform? Needs testing
-					if !bytes.Equal(buffer[:length], []byte{'.', '\r', '\n'}) {
-						message = append(message, buffer[:length]...)
-					} else {
-						break
-					}
-				}
-				fmt.Fprintf(os.Stdout, "read %d bytes from %s: %s\n", length, remoteAddr, string(buffer[:length]))
-			}
+			// Parse message
+			var inc api.AnnotatedMessage
+			json.Unmarshal(buffer[:length], &inc)
+			fmt.Fprintf(os.Stdout, "incoming command: %s, target: %s\n", inc.Command, inc.Target)
+			var msg api.BareMessage
+			json.Unmarshal(inc.Payload, &msg)
+			fmt.Fprintf(os.Stdout, "incoming message: %s\n", msg.Message)
 		}
 	}
+}
+
+func startServer(ctx context.Context, port string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	server := &http.Server{Addr: ":" + port}
+
+	http.HandleFunc("/", clientsHandler)
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil {
+			fmt.Fprintf(os.Stderr, "server stopped: %v", err)
+			cancel()
+		}
+	}()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			if err := server.Shutdown(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "server stopped: %v", err)
+				os.Exit(1)
+			}
+		}
+	}()
+	return nil
+}
+
+func clientsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	clients := make([]string, 0)
+
+	for client := range udpClients {
+		clients = append(clients, client)
+	}
+
+	json.NewEncoder(w).Encode(clients)
 }
