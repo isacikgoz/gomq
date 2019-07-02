@@ -1,6 +1,7 @@
 package networking
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -23,16 +24,14 @@ func (l *TCPSocket) Close() {
 
 // Listen listens messages from a TCP socket
 func (l *TCPSocket) Listen() (*api.AnnotatedMessage, error) {
-	var buffer []byte
-	length, err := l.client.Reader.Read(buffer)
+	buf := make([]byte, 4096)
+	reader := l.client.Reader.(*bufio.Reader)
+	length, err := reader.Read(buf)
 	if err != nil {
-		// Connection has been closed
-		*l.client.Closed <- true // TODO: This is blocking - shouldn't be
-		return nil, fmt.Errorf("could not read from socket: %v", err)
+		return nil, fmt.Errorf("could not read TCP: %v", err)
 	}
-
 	// Parse message
 	var inc api.AnnotatedMessage
-	json.Unmarshal(buffer[:length], &inc)
+	json.Unmarshal(buf[:length], &inc)
 	return &inc, nil
 }

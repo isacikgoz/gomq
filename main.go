@@ -13,10 +13,9 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/isacikgoz/gomq/networking"
-
 	"github.com/isacikgoz/gomq/api"
 	"github.com/isacikgoz/gomq/messaging"
+	"github.com/isacikgoz/gomq/networking"
 )
 
 var (
@@ -52,10 +51,8 @@ func main() {
 	interrupt := make(chan os.Signal)
 	signal.Notify(interrupt, syscall.SIGTERM, os.Interrupt)
 
-	wg := &sync.WaitGroup{}
-
-	go listenOnUDPConnection(ctx, UDPListener)
-	go listenOnTCPConnection(ctx, TCPListener, wg)
+	go listenUDP(ctx, UDPListener)
+	go listenTCP(ctx, TCPListener)
 
 	if err := startServer(ctx, "8080"); err != nil {
 		log.Fatal(err)
@@ -82,11 +79,9 @@ func main() {
 		}
 	}()
 	<-quit
-	wg.Wait()
-
 }
 
-func listenOnUDPConnection(ctx context.Context, listener *networking.UDPListener) {
+func listenUDP(ctx context.Context, listener *networking.UDPListener) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	for {
@@ -105,8 +100,8 @@ func listenOnUDPConnection(ctx context.Context, listener *networking.UDPListener
 	}
 }
 
-func listenOnTCPConnection(ctx context.Context, listener *networking.TCPListener, wg *sync.WaitGroup) {
-	defer wg.Done()
+func listenTCP(ctx context.Context, listener *networking.TCPListener) {
+	wg := &sync.WaitGroup{}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	for {
@@ -118,20 +113,22 @@ func listenOnTCPConnection(ctx context.Context, listener *networking.TCPListener
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "an error occurred whilst opening a TCP socket for reading: %v\n", err)
 			}
-
+			wg.Add(1)
 			go func(socket *networking.TCPSocket) {
+				defer wg.Done()
 				for {
 					inc, err := socket.Listen()
 
 					if err != nil {
 						// Connection has been closed
-						fmt.Fprintln(logger, "closed a connection")
 						break
 					}
 					messages <- inc
 				}
 				fmt.Fprintf(logger, "a TCP connection was closed\n")
 			}(socket)
+			wg.Wait()
+			break
 		}
 	}
 }
