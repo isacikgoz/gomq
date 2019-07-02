@@ -23,15 +23,15 @@ func (l *TCPSocket) Close() {
 }
 
 // Listen listens messages from a TCP socket
-func (l *TCPSocket) Listen() (*api.AnnotatedMessage, error) {
-	buf := make([]byte, 4096)
+func (l *TCPSocket) Listen() (*api.AnnotatedMessage, *messaging.Client, error) {
+	buf := make([]byte, 16384)
 	reader := l.client.Reader.(*bufio.Reader)
 	length, err := reader.Read(buf)
 	if err != nil {
-		return nil, fmt.Errorf("could not read TCP: %v", err)
+		return nil, l.client, fmt.Errorf("could not read TCP: %v", err)
 	}
 	// Parse message
 	var inc api.AnnotatedMessage
 	json.Unmarshal(buf[:length], &inc)
-	return &inc, nil
+	return &inc, l.client, nil
 }

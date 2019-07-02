@@ -2,34 +2,39 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/isacikgoz/gomq/api"
 	"github.com/isacikgoz/gomq/messaging"
 	"github.com/isacikgoz/gomq/networking"
+	"github.com/isacikgoz/gomq/server"
 )
 
 var (
-	udpClients map[string]*messaging.Client
-	tcpClients map[string]*messaging.Client
 	logger     io.Writer
-
-	messages chan *api.AnnotatedMessage
+	messages   chan *IncomingMessage
+	dispatcher *messaging.Dispatcher
 )
 
+// IncomingMessage holds a message with sender information
+type IncomingMessage struct {
+	message *api.AnnotatedMessage
+	sender  *messaging.Client
+}
+
 func main() {
-	udpClients = make(map[string]*messaging.Client)
-	tcpClients = make(map[string]*messaging.Client)
-	messages = make(chan *api.AnnotatedMessage, 2048)
+	udpClients := make(map[string]*messaging.Client)
+	tcpClients := make(map[string]*messaging.Client)
+
+	messages = make(chan *IncomingMessage, 2048)
+
+	dispatcher = messaging.NewDispatcher()
 
 	logger = os.Stdout
 
@@ -54,7 +59,9 @@ func main() {
 	go listenUDP(ctx, UDPListener)
 	go listenTCP(ctx, TCPListener)
 
-	if err := startServer(ctx, "8080"); err != nil {
+	backend := server.NewBackend(udpClients, tcpClients)
+
+	if err := backend.StartServer(ctx, "8080"); err != nil {
 		log.Fatal(err)
 	}
 
@@ -70,11 +77,8 @@ func main() {
 			case <-interrupt:
 				cancel()
 				fmt.Fprintln(logger, "cancelling context...")
-			case inc := <-messages:
-				var msg api.BareMessage
-				json.Unmarshal(inc.Payload, &msg)
-				fmt.Fprintf(logger, "incoming command: %s, target: %s\n", inc.Command, inc.Target)
-				fmt.Fprintf(logger, "incoming message: %s\n", msg.Message)
+			case rm := <-messages:
+				dispatchMessage(rm)
 			}
 		}
 	}()
@@ -90,12 +94,12 @@ func listenUDP(ctx context.Context, listener *networking.UDPListener) {
 			fmt.Fprintln(logger, "gracefully shutting down")
 			return
 		default:
-			inc, err := listener.Listen(ctx)
+			inc, client, err := listener.Listen(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "could not listen UDP: %v\n", err)
 				return
 			}
-			messages <- inc
+			messages <- &IncomingMessage{inc, client}
 		}
 	}
 }
@@ -113,17 +117,18 @@ func listenTCP(ctx context.Context, listener *networking.TCPListener) {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "an error occurred whilst opening a TCP socket for reading: %v\n", err)
 			}
+
 			wg.Add(1)
 			go func(socket *networking.TCPSocket) {
 				defer wg.Done()
 				for {
-					inc, err := socket.Listen()
+					inc, client, err := socket.Listen()
 
 					if err != nil {
 						// Connection has been closed
 						break
 					}
-					messages <- inc
+					messages <- &IncomingMessage{inc, client}
 				}
 				fmt.Fprintf(logger, "a TCP connection was closed\n")
 			}(socket)
@@ -133,41 +138,18 @@ func listenTCP(ctx context.Context, listener *networking.TCPListener) {
 	}
 }
 
-func startServer(ctx context.Context, port string) error {
-	ctx, cancel := context.WithCancel(ctx)
-	server := &http.Server{Addr: ":" + port}
+func dispatchMessage(rm *IncomingMessage) error {
 
-	http.HandleFunc("/", clientsHandler)
+	msg := rm.message
+	client := rm.sender
 
-	go func() {
-		if err := server.ListenAndServe(); err != nil &&
-			!strings.Contains(err.Error(), "Server closed") {
-			fmt.Fprintf(os.Stderr, "server stopped: %v\n", err)
-			cancel()
-		}
-	}()
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			if err := server.Shutdown(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "server shutdown error: %v\n", err)
-			}
-		}
-	}()
-	return nil
-}
-
-func clientsHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	clients := make([]string, 0)
-
-	for client := range udpClients {
-		clients = append(clients, client)
+	switch msg.Command {
+	case "PUB":
+		dispatcher.Dispatch(msg, client)
+	case "SUB":
+		dispatcher.Subscribe(msg.Target, client)
+	default:
+		// send client that msg is unrecognized
 	}
-
-	json.NewEncoder(w).Encode(clients)
+	return nil
 }

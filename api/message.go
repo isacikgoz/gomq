@@ -8,8 +8,3 @@ type AnnotatedMessage struct {
 	Target  string          `json:"target"`  // defines the topic/or queue name
 	Payload json.RawMessage `json:"Payload"` // the original message
 }
-
-// BareMessage is the deafult data type to be passed
-type BareMessage struct {
-	Message string
-}

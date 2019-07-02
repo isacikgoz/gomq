@@ -44,33 +44,32 @@ func (l *UDPListener) Close() {
 }
 
 // Listen listens the incoming UDP data and parses it
-func (l *UDPListener) Listen(ctx context.Context) (*api.AnnotatedMessage, error) {
+func (l *UDPListener) Listen(ctx context.Context) (*api.AnnotatedMessage, *messaging.Client, error) {
 	var buffer [16384]byte
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	select {
 	case <-ctx.Done():
-		return nil, nil
+		return nil, nil, nil
 	default:
 		length, remoteAddr, err := l.conn.ReadFromUDP(buffer[0:])
 		if err != nil {
-			return nil, fmt.Errorf("could not read UDP: %v", err)
+			return nil, nil, fmt.Errorf("could not read UDP: %v", err)
 		}
 
 		// Check if we've seen UDP packets from this address before - if so, reuse
 		// existing client object
 		client, ok := l.clients[remoteAddr.String()]
 		if !ok {
-			writer := messaging.NewUDPWriter(l.conn, remoteAddr)
+			writer := NewUDPWriter(l.conn, remoteAddr)
 			bufferedWriter := bufio.NewWriter(writer)
 
 			client = messaging.NewClient("name goes here", bufferedWriter, nil)
 			l.clients[remoteAddr.String()] = client
 		}
-
 		// Parse message
 		var inc api.AnnotatedMessage
 		json.Unmarshal(buffer[:length], &inc)
-		return &inc, nil
+		return &inc, client, nil
 	}
 }
