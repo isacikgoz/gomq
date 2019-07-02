@@ -1,16 +1,19 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
+
+	"github.com/isacikgoz/gomq/networking"
 
 	"github.com/isacikgoz/gomq/api"
 	"github.com/isacikgoz/gomq/messaging"
@@ -18,31 +21,26 @@ import (
 
 var (
 	udpClients map[string]*messaging.Client
+	tcpClients map[string]*messaging.Client
+	logger     io.Writer
+
+	messages chan *api.AnnotatedMessage
 )
 
 func main() {
 	udpClients = make(map[string]*messaging.Client)
+	tcpClients = make(map[string]*messaging.Client)
+	messages = make(chan *api.AnnotatedMessage, 2048)
 
-	udpAddr := &net.UDPAddr{
-		Port: 12345,
-		IP:   net.ParseIP("127.0.0.1"),
-	}
-	udpConn, err := net.ListenUDP("udp", udpAddr)
-	defer udpConn.Close()
+	logger = os.Stdout
 
+	UDPListener, err := networking.NewUDPListener("127.0.0.1", 12345, udpClients)
+	defer UDPListener.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Open TCP socket
-	tcpAddr, err := net.ResolveTCPAddr("tcp", ":12345")
-
-	if err != nil {
-		panic(err)
-	}
-
-	tcpListener, err := net.ListenTCP("tcp", tcpAddr)
-	defer tcpListener.Close()
+	TCPListener, err := networking.NewTCPListener("127.0.0.1", 12345, tcpClients)
+	defer TCPListener.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -54,70 +52,86 @@ func main() {
 	interrupt := make(chan os.Signal)
 	signal.Notify(interrupt, syscall.SIGTERM, os.Interrupt)
 
-	go listenOnUDPConnection(ctx, udpConn)
+	wg := &sync.WaitGroup{}
+
+	go listenOnUDPConnection(ctx, UDPListener)
+	go listenOnTCPConnection(ctx, TCPListener, wg)
 
 	if err := startServer(ctx, "8080"); err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Fprintf(os.Stdout, "started.\n")
+	fmt.Fprintf(logger, "started.\n")
 	quit := make(chan struct{})
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Fprintln(os.Stdout, "context done.")
+				fmt.Fprintln(logger, "context done.")
 				quit <- struct{}{}
 				return
 			case <-interrupt:
 				cancel()
-				fmt.Fprintln(os.Stdout, "cancelling context...")
+				fmt.Fprintln(logger, "cancelling context...")
+			case inc := <-messages:
+				var msg api.BareMessage
+				json.Unmarshal(inc.Payload, &msg)
+				fmt.Fprintf(logger, "incoming command: %s, target: %s\n", inc.Command, inc.Target)
+				fmt.Fprintf(logger, "incoming message: %s\n", msg.Message)
 			}
 		}
 	}()
 	<-quit
+	wg.Wait()
+
 }
 
-func listenOnUDPConnection(ctx context.Context, udpConn *net.UDPConn) {
-	var buffer [2048]byte
+func listenOnUDPConnection(ctx context.Context, listener *networking.UDPListener) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(os.Stdout, "gracefully shutting down")
+			fmt.Fprintln(logger, "gracefully shutting down")
 			return
 		default:
-			length, remoteAddr, err := udpConn.ReadFromUDP(buffer[0:])
+			inc, err := listener.Listen(ctx)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "could not read from UDP: %v\n", err)
-				os.Exit(1)
+				fmt.Fprintf(os.Stderr, "could not listen UDP: %v\n", err)
+				return
+			}
+			messages <- inc
+		}
+	}
+}
+
+func listenOnTCPConnection(ctx context.Context, listener *networking.TCPListener, wg *sync.WaitGroup) {
+	defer wg.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			socket, err := listener.AcceptConnection(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "an error occurred whilst opening a TCP socket for reading: %v\n", err)
 			}
 
-			// Check if we've seen UDP packets from this address before - if so, reuse
-			// existing client object
-			client, ok := udpClients[remoteAddr.String()]
-			if !ok {
-				fmt.Fprintf(os.Stdout, "new UDP client discovered!\n")
-				writer := messaging.NewUDPWriter(udpConn, remoteAddr)
-				bufferedWriter := bufio.NewWriter(writer)
+			go func(socket *networking.TCPSocket) {
+				for {
+					inc, err := socket.Listen()
 
-				client = messaging.NewClient("name goes here", bufferedWriter, nil)
-				udpClients[remoteAddr.String()] = client
-			} else {
-				fmt.Fprintf(os.Stdout, "Found UDP client!\n")
-			}
-
-			// Log the number of bytes received
-			fmt.Fprintf(os.Stdout, "bytes received from UDP: %d\n", length)
-
-			// Parse message
-			var inc api.AnnotatedMessage
-			json.Unmarshal(buffer[:length], &inc)
-			fmt.Fprintf(os.Stdout, "incoming command: %s, target: %s\n", inc.Command, inc.Target)
-			var msg api.BareMessage
-			json.Unmarshal(inc.Payload, &msg)
-			fmt.Fprintf(os.Stdout, "incoming message: %s\n", msg.Message)
+					if err != nil {
+						// Connection has been closed
+						fmt.Fprintln(logger, "closed a connection")
+						break
+					}
+					messages <- inc
+				}
+				fmt.Fprintf(logger, "a TCP connection was closed\n")
+			}(socket)
 		}
 	}
 }
@@ -129,8 +143,9 @@ func startServer(ctx context.Context, port string) error {
 	http.HandleFunc("/", clientsHandler)
 
 	go func() {
-		if err := server.ListenAndServe(); err != nil {
-			fmt.Fprintf(os.Stderr, "server stopped: %v", err)
+		if err := server.ListenAndServe(); err != nil &&
+			!strings.Contains(err.Error(), "Server closed") {
+			fmt.Fprintf(os.Stderr, "server stopped: %v\n", err)
 			cancel()
 		}
 	}()
@@ -139,8 +154,7 @@ func startServer(ctx context.Context, port string) error {
 		select {
 		case <-ctx.Done():
 			if err := server.Shutdown(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "server stopped: %v", err)
-				os.Exit(1)
+				fmt.Fprintf(os.Stderr, "server shutdown error: %v\n", err)
 			}
 		}
 	}()
