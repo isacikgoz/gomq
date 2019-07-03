@@ -78,7 +78,17 @@ func main() {
 				cancel()
 				fmt.Fprintln(logger, "cancelling context...")
 			case rm := <-messages:
-				dispatchMessage(rm)
+				msg := rm.message
+				client := rm.sender
+
+				switch msg.Command {
+				case "PUB":
+					dispatcher.Dispatch(msg, client)
+				case "SUB":
+					dispatcher.Subscribe(msg.Target, client)
+				default:
+					// send client that msg is unrecognized
+				}
 			}
 		}
 	}()
@@ -132,24 +142,7 @@ func listenTCP(ctx context.Context, listener *networking.TCPListener) {
 				}
 				fmt.Fprintf(logger, "a TCP connection was closed\n")
 			}(socket)
-			wg.Wait()
-			break
 		}
+		wg.Wait()
 	}
-}
-
-func dispatchMessage(rm *IncomingMessage) error {
-
-	msg := rm.message
-	client := rm.sender
-
-	switch msg.Command {
-	case "PUB":
-		dispatcher.Dispatch(msg, client)
-	case "SUB":
-		dispatcher.Subscribe(msg.Target, client)
-	default:
-		// send client that msg is unrecognized
-	}
-	return nil
 }
