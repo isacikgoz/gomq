@@ -40,7 +40,7 @@ func (d *Dispatcher) Dispatch(msg *api.AnnotatedMessage, c *Client) error {
 	return nil
 }
 
-// Subscribe adds a listener to the topic of the events on the CommandBus
+// Subscribe adds a listener to the topic of the events on the Queue
 func (d *Dispatcher) Subscribe(topic string, c *Client) error {
 
 	d.listeners[topic] = append(d.listeners[topic], c)
@@ -50,6 +50,24 @@ func (d *Dispatcher) Subscribe(topic string, c *Client) error {
 		d.queues[topic] = make(chan *api.AnnotatedMessage)
 		go d.collate(topic) // start routine for each context ie. topic
 	}
+	return nil
+}
+
+// Unsubscribe removes a listener from the topic
+func (d *Dispatcher) Unsubscribe(topic string, c *Client) error {
+
+	l := d.listeners[topic]
+
+	for i, listener := range l {
+		if listener.Name == c.Name {
+			copy(l[i:], l[i+1:])
+			l[len(l)-1] = nil // or the zero value of T
+			l = l[:len(l)-1]
+			d.listeners[topic] = l
+			break
+		}
+	}
+
 	return nil
 }
 

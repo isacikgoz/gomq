@@ -86,6 +86,8 @@ func main() {
 					dispatcher.Dispatch(msg, client)
 				case "SUB":
 					dispatcher.Subscribe(msg.Target, client)
+				case "UNS":
+					dispatcher.Unsubscribe(msg.Target, client)
 				default:
 					// send client that msg is unrecognized
 				}
