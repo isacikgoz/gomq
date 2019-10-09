@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/isacikgoz/gomq/messaging"
+	"github.com/isacikgoz/gomq/internal/messaging"
 )
 
 // Backend is the REST API for query the clients

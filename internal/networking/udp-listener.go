@@ -8,7 +8,7 @@ import (
 	"net"
 
 	"github.com/isacikgoz/gomq/api"
-	"github.com/isacikgoz/gomq/messaging"
+	"github.com/isacikgoz/gomq/internal/messaging"
 )
 
 // UDPListener listens incoming messages from UDP

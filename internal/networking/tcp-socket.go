@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/isacikgoz/gomq/messaging"
+	"github.com/isacikgoz/gomq/internal/messaging"
 
 	"github.com/isacikgoz/gomq/api"
 )

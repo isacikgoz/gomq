@@ -11,9 +11,9 @@ import (
 	"syscall"
 
 	"github.com/isacikgoz/gomq/api"
-	"github.com/isacikgoz/gomq/messaging"
-	"github.com/isacikgoz/gomq/networking"
-	"github.com/isacikgoz/gomq/server"
+	"github.com/isacikgoz/gomq/internal/messaging"
+	"github.com/isacikgoz/gomq/internal/networking"
+	"github.com/isacikgoz/gomq/internal/server"
 )
 
 var (
